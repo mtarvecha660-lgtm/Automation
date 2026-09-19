@@ -1,0 +1,108 @@
+name: AI YouTube Clipper
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "YouTube URL"
+        required: true
+        type: string
+
+      chat_id:
+        description: "Telegram chat ID"
+        required: true
+        type: string
+
+      request_id:
+        description: "Job ID"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      YOUTUBE_URL: ${{ inputs.youtube_url }}
+      CHAT_ID: ${{ inputs.chat_id }}
+      REQUEST_ID: ${{ inputs.request_id }}
+
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      GEMINI_MODEL: gemini-2.5-flash
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg and Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip
+
+      - name: Install Python packages
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "yt-dlp[default]" faster-whisper requests
+
+      - name: Send started message
+        run: |
+          curl -sS \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=🎬 Job ${REQUEST_ID} started.%0A%0ADownloading video and finding the best moments..." \
+            >/dev/null
+
+      - name: Download YouTube video
+        run: |
+          mkdir -p work
+
+          yt-dlp \
+            --no-playlist \
+            --restrict-filenames \
+            -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]" \
+            --merge-output-format mp4 \
+            -o "work/source.%(ext)s" \
+            "$YOUTUBE_URL"
+
+      - name: Transcribe video
+        run: |
+          python3 scripts/transcribe.py \
+            work/source.mp4 \
+            work/transcript.json
+
+      - name: Select best clips with Gemini
+        run: |
+          python3 scripts/select_clips.py \
+            work/transcript.json \
+            work/clips.json \
+            "$GEMINI_API_KEY" \
+            "$GEMINI_MODEL"
+
+      - name: Render vertical clips
+        run: |
+          python3 scripts/render_clips.py \
+            work/source.mp4 \
+            work/transcript.json \
+            work/clips.json \
+            work/output
+
+      - name: Send clips to Telegram
+        run: |
+          python3 scripts/send_telegram.py \
+            work/clips.json \
+            work/output \
+            "$TELEGRAM_BOT_TOKEN" \
+            "$CHAT_ID"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf work
