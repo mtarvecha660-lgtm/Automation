@@ -33,6 +33,7 @@ jobs:
 
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
 
       GEMINI_MODEL: gemini-2.5-flash
 
@@ -46,7 +47,7 @@ jobs:
 
 
       # ==========================================
-      # 2. SETUP NODE.JS
+      # 2. NODE.JS
       # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -55,7 +56,7 @@ jobs:
 
 
       # ==========================================
-      # 3. INSTALL SYSTEM DEPENDENCIES
+      # 3. SYSTEM DEPENDENCIES
       # ==========================================
       - name: Install FFmpeg and Python
         run: |
@@ -64,7 +65,7 @@ jobs:
 
 
       # ==========================================
-      # 4. INSTALL PYTHON PACKAGES
+      # 4. PYTHON PACKAGES
       # ==========================================
       - name: Install Python packages
         run: |
@@ -78,13 +79,11 @@ jobs:
 
 
       # ==========================================
-      # 5. INSTALL BGUTIL PO TOKEN SERVER
+      # 5. INSTALL BGUTIL PO TOKEN PROVIDER
       # ==========================================
       - name: Install BgUtils PO Token Provider
         run: |
           set -e
-
-          echo "Cloning bgutil-ytdlp-pot-provider 2.0.0..."
 
           git clone \
             --single-branch \
@@ -94,25 +93,17 @@ jobs:
 
           cd bgutil-ytdlp-pot-provider/server
 
-          echo "Installing Node dependencies..."
-
           npm ci
-
-          echo "Building provider..."
 
           npx tsc
 
-          echo "Provider build complete."
-
           cd ../..
 
-          echo ""
-          echo "Provider files:"
-          ls -lah bgutil-ytdlp-pot-provider/server/
+          echo "BgUtils provider installed."
 
 
       # ==========================================
-      # 6. START PO TOKEN SERVER
+      # 6. START BGUTIL SERVER
       # ==========================================
       - name: Start PO Token Server
         shell: bash
@@ -121,111 +112,63 @@ jobs:
 
           cd bgutil-ytdlp-pot-provider/server
 
-          echo "Starting BgUtils PO Token server..."
-
           nohup node build/main.js \
             --host 127.0.0.1 \
             --port 4416 \
             > "$GITHUB_WORKSPACE/bgutil-provider.log" 2>&1 &
 
-          PROVIDER_PID=$!
-
-          echo "$PROVIDER_PID" > "$GITHUB_WORKSPACE/bgutil-provider.pid"
+          echo $! > "$GITHUB_WORKSPACE/bgutil-provider.pid"
 
           cd ../..
 
-          echo "Provider PID: $PROVIDER_PID"
-
-          echo "Waiting for provider..."
+          echo "Waiting for PO Token server..."
 
           for i in {1..30}; do
-
-            if curl -sS \
-              --max-time 2 \
-              http://127.0.0.1:4416/ \
-              >/dev/null 2>&1; then
-
-              echo "PO Token provider is responding."
-
+            if (echo > /dev/tcp/127.0.0.1/4416) 2>/dev/null; then
+              echo "PO Token server is running."
               break
             fi
 
-            echo "Waiting... attempt $i/30"
-
             sleep 2
-
           done
 
-          echo ""
-          echo "Provider log:"
-
-          cat bgutil-provider.log || true
-
-          echo ""
-          echo "Checking port 4416..."
-
           if ! (echo > /dev/tcp/127.0.0.1/4416) 2>/dev/null; then
-            echo "ERROR: PO Token provider is not listening on port 4416."
-
+            echo "ERROR: PO Token server failed to start."
             cat bgutil-provider.log || true
-
             exit 1
           fi
 
-          echo "PO Token provider is running."
-
 
       # ==========================================
-      # 7. VERIFY INSTALLATION
+      # 7. VERIFY TOOLS
       # ==========================================
       - name: Verify tools
         run: |
-          echo "========================================"
-          echo "Python"
-          echo "========================================"
-
+          echo "Python:"
           python3 --version
 
           echo ""
-          echo "========================================"
-          echo "Node"
-          echo "========================================"
-
+          echo "Node:"
           node --version
 
           echo ""
-          echo "========================================"
-          echo "npm"
-          echo "========================================"
-
-          npm --version
-
-          echo ""
-          echo "========================================"
-          echo "yt-dlp"
-          echo "========================================"
-
+          echo "yt-dlp:"
           python3 -m yt_dlp --version
 
           echo ""
-          echo "========================================"
-          echo "FFmpeg"
-          echo "========================================"
-
+          echo "FFmpeg:"
           ffmpeg -version | head -n 1
 
           echo ""
-          echo "========================================"
-          echo "PO TOKEN PROVIDERS"
-          echo "========================================"
+          echo "PO Token providers:"
 
           python3 -m yt_dlp \
             --verbose \
             --simulate \
             "https://www.youtube.com/watch?v=M9NQT9q7PEE" \
             2>&1 | grep -E \
-            "PO Token Providers|bgutil|youtube]" \
-            | head -30 || true
+            "PO Token Providers|bgutil" \
+            | head -20 || true
 
 
       # ==========================================
@@ -237,57 +180,56 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=🎬 Job ${REQUEST_ID} started. Downloading video and finding the best moments..." \
+            --data-urlencode \
+            "text=🎬 Job ${REQUEST_ID} started. Downloading video and finding the best moments..." \
             >/dev/null
 
 
       # ==========================================
-      # 9. NORMALIZE YOUTUBE URL
+      # 9. CREATE WORK DIRECTORY
+      # ==========================================
+      - name: Create work directory
+        run: |
+          mkdir -p work
+
+
+      # ==========================================
+      # 10. NORMALIZE YOUTUBE URL
       # ==========================================
       - name: Normalize YouTube URL
         shell: bash
         run: |
           set -e
 
-          mkdir -p work
-
           RAW_URL="$(printf '%s' "$YOUTUBE_URL" | tr -d '\r\n')"
 
-          echo "Raw URL:"
+          echo "Received YouTube URL:"
           printf '<%s>\n' "$RAW_URL"
 
           VIDEO_ID=""
 
-          # Standard YouTube watch URL
           if [[ "$RAW_URL" =~ youtube\.com/watch\?[^[:space:]]*v=([A-Za-z0-9_-]{11}) ]]; then
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
-          # Short YouTube URL
           if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtu\.be/([A-Za-z0-9_-]{11}) ]]; then
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
-          # YouTube Shorts
           if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtube\.com/shorts/([A-Za-z0-9_-]{11}) ]]; then
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
           if [[ -z "$VIDEO_ID" ]]; then
             echo "ERROR: Could not extract YouTube video ID."
-
-            printf '<%s>\n' "$RAW_URL"
-
             exit 1
           fi
 
           CANONICAL_URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
 
-          echo ""
           echo "Video ID:"
           echo "$VIDEO_ID"
 
-          echo ""
           echo "Canonical URL:"
           echo "$CANONICAL_URL"
 
@@ -295,7 +237,38 @@ jobs:
 
 
       # ==========================================
-      # 10. TEST YOUTUBE + PO TOKEN
+      # 11. PREPARE YOUTUBE COOKIES
+      # ==========================================
+      - name: Prepare YouTube cookies
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "$YOUTUBE_COOKIES_B64" ]; then
+            echo "ERROR: YOUTUBE_COOKIES_B64 GitHub Secret is missing."
+            exit 1
+          fi
+
+          printf '%s' "$YOUTUBE_COOKIES_B64" \
+            | base64 --decode \
+            > work/youtube_cookies.txt
+
+          chmod 600 work/youtube_cookies.txt
+
+          echo "Cookie file created."
+
+          if ! head -n 1 work/youtube_cookies.txt | grep -Eq \
+            '^# (HTTP Cookie File|Netscape HTTP Cookie File)'; then
+
+            echo "ERROR: Invalid cookies.txt format."
+            exit 1
+          fi
+
+          echo "Cookie format verified."
+
+
+      # ==========================================
+      # 12. TEST YOUTUBE EXTRACTION
       # ==========================================
       - name: Test YouTube extraction
         shell: bash
@@ -305,7 +278,7 @@ jobs:
           URL="$(cat work/youtube_url.txt)"
 
           echo "========================================"
-          echo "TESTING YOUTUBE + PO TOKEN"
+          echo "TESTING YOUTUBE EXTRACTION"
           echo "========================================"
 
           echo "URL:"
@@ -318,13 +291,14 @@ jobs:
             --simulate \
             --no-playlist \
             --force-ipv4 \
+            --cookies "work/youtube_cookies.txt" \
             --ies "youtube" \
             --extractor-args "youtube:player_client=mweb" \
             "$URL"
 
 
       # ==========================================
-      # 11. DOWNLOAD YOUTUBE VIDEO
+      # 13. DOWNLOAD YOUTUBE VIDEO
       # ==========================================
       - name: Download YouTube video
         shell: bash
@@ -334,16 +308,14 @@ jobs:
           URL="$(cat work/youtube_url.txt)"
 
           echo "========================================"
-          echo "DOWNLOADING YOUTUBE VIDEO"
+          echo "DOWNLOADING VIDEO"
           echo "========================================"
-
-          echo "URL:"
-          echo "$URL"
 
           python3 -m yt_dlp \
             --verbose \
             --no-playlist \
             --force-ipv4 \
+            --cookies "work/youtube_cookies.txt" \
             --ies "youtube" \
             --extractor-args "youtube:player_client=mweb" \
             -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b" \
@@ -353,15 +325,13 @@ jobs:
             "$URL"
 
           echo ""
-          echo "========================================"
-          echo "DOWNLOAD RESULT"
-          echo "========================================"
+          echo "Download result:"
 
           find work -maxdepth 1 -type f -ls
 
 
       # ==========================================
-      # 12. VERIFY VIDEO
+      # 14. VERIFY VIDEO
       # ==========================================
       - name: Verify downloaded video
         shell: bash
@@ -373,7 +343,6 @@ jobs:
 
             echo ""
             echo "Files found:"
-
             find work -maxdepth 2 -type f -print
 
             exit 1
@@ -384,7 +353,6 @@ jobs:
           ls -lh work/source.mp4
 
           echo ""
-          echo "Video information:"
 
           ffprobe \
             -v error \
@@ -394,7 +362,7 @@ jobs:
 
 
       # ==========================================
-      # 13. TRANSCRIBE
+      # 15. TRANSCRIBE
       # ==========================================
       - name: Transcribe video
         run: |
@@ -402,14 +370,12 @@ jobs:
             work/source.mp4 \
             work/transcript.json
 
-          echo ""
           echo "Transcript created:"
-
           ls -lh work/transcript.json
 
 
       # ==========================================
-      # 14. GEMINI CLIP SELECTION
+      # 16. GEMINI CLIP SELECTION
       # ==========================================
       - name: Select best clips with Gemini
         run: |
@@ -421,12 +387,11 @@ jobs:
 
           echo ""
           echo "Selected clips:"
-
           cat work/clips.json
 
 
       # ==========================================
-      # 15. RENDER VERTICAL CLIPS
+      # 17. RENDER VERTICAL CLIPS
       # ==========================================
       - name: Render vertical clips
         run: |
@@ -440,12 +405,11 @@ jobs:
 
           echo ""
           echo "Rendered clips:"
-
           find work/output -maxdepth 1 -type f -print
 
 
       # ==========================================
-      # 16. SEND CLIPS TO TELEGRAM
+      # 18. SEND CLIPS TO TELEGRAM
       # ==========================================
       - name: Send clips to Telegram
         run: |
@@ -457,7 +421,7 @@ jobs:
 
 
       # ==========================================
-      # 17. SUCCESS MESSAGE
+      # 19. SUCCESS MESSAGE
       # ==========================================
       - name: Send completion message
         if: success()
@@ -466,12 +430,13 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ Job ${REQUEST_ID} completed! Your AI-selected clips are ready." \
+            --data-urlencode \
+            "text=✅ Job ${REQUEST_ID} completed! Your AI-selected clips are ready." \
             >/dev/null
 
 
       # ==========================================
-      # 18. FAILURE MESSAGE
+      # 20. FAILURE MESSAGE
       # ==========================================
       - name: Send failure message
         if: failure()
@@ -480,12 +445,13 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=❌ Job ${REQUEST_ID} failed. Open GitHub Actions to see the exact failed step." \
+            --data-urlencode \
+            "text=❌ Job ${REQUEST_ID} failed. Open GitHub Actions to see the failed step." \
             >/dev/null
 
 
       # ==========================================
-      # 19. SHOW PO TOKEN LOG ON FAILURE
+      # 21. SHOW PO TOKEN LOG
       # ==========================================
       - name: Show PO Token provider log
         if: always()
@@ -502,7 +468,7 @@ jobs:
 
 
       # ==========================================
-      # 20. CLEANUP
+      # 22. CLEANUP
       # ==========================================
       - name: Cleanup
         if: always()
