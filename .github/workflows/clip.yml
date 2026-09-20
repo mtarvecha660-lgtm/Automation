@@ -46,7 +46,16 @@ jobs:
 
 
       # ==========================================
-      # 2. INSTALL SYSTEM TOOLS
+      # 2. SETUP NODE.JS
+      # ==========================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+
+      # ==========================================
+      # 3. INSTALL SYSTEM DEPENDENCIES
       # ==========================================
       - name: Install FFmpeg and Python
         run: |
@@ -55,7 +64,7 @@ jobs:
 
 
       # ==========================================
-      # 3. INSTALL PYTHON PACKAGES
+      # 4. INSTALL PYTHON PACKAGES
       # ==========================================
       - name: Install Python packages
         run: |
@@ -64,40 +73,163 @@ jobs:
           python3 -m pip install -U \
             "yt-dlp[default]" \
             faster-whisper \
-            requests
+            requests \
+            bgutil-ytdlp-pot-provider
 
 
       # ==========================================
-      # 4. VERIFY TOOLS
+      # 5. INSTALL BGUTIL PO TOKEN SERVER
+      # ==========================================
+      - name: Install BgUtils PO Token Provider
+        run: |
+          set -e
+
+          echo "Cloning bgutil-ytdlp-pot-provider 2.0.0..."
+
+          git clone \
+            --single-branch \
+            --branch 2.0.0 \
+            https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+            bgutil-ytdlp-pot-provider
+
+          cd bgutil-ytdlp-pot-provider/server
+
+          echo "Installing Node dependencies..."
+
+          npm ci
+
+          echo "Building provider..."
+
+          npx tsc
+
+          echo "Provider build complete."
+
+          cd ../..
+
+          echo ""
+          echo "Provider files:"
+          ls -lah bgutil-ytdlp-pot-provider/server/
+
+
+      # ==========================================
+      # 6. START PO TOKEN SERVER
+      # ==========================================
+      - name: Start PO Token Server
+        shell: bash
+        run: |
+          set -e
+
+          cd bgutil-ytdlp-pot-provider/server
+
+          echo "Starting BgUtils PO Token server..."
+
+          nohup node build/main.js \
+            --host 127.0.0.1 \
+            --port 4416 \
+            > "$GITHUB_WORKSPACE/bgutil-provider.log" 2>&1 &
+
+          PROVIDER_PID=$!
+
+          echo "$PROVIDER_PID" > "$GITHUB_WORKSPACE/bgutil-provider.pid"
+
+          cd ../..
+
+          echo "Provider PID: $PROVIDER_PID"
+
+          echo "Waiting for provider..."
+
+          for i in {1..30}; do
+
+            if curl -sS \
+              --max-time 2 \
+              http://127.0.0.1:4416/ \
+              >/dev/null 2>&1; then
+
+              echo "PO Token provider is responding."
+
+              break
+            fi
+
+            echo "Waiting... attempt $i/30"
+
+            sleep 2
+
+          done
+
+          echo ""
+          echo "Provider log:"
+
+          cat bgutil-provider.log || true
+
+          echo ""
+          echo "Checking port 4416..."
+
+          if ! (echo > /dev/tcp/127.0.0.1/4416) 2>/dev/null; then
+            echo "ERROR: PO Token provider is not listening on port 4416."
+
+            cat bgutil-provider.log || true
+
+            exit 1
+          fi
+
+          echo "PO Token provider is running."
+
+
+      # ==========================================
+      # 7. VERIFY INSTALLATION
       # ==========================================
       - name: Verify tools
         run: |
           echo "========================================"
           echo "Python"
           echo "========================================"
+
           python3 --version
+
+          echo ""
+          echo "========================================"
+          echo "Node"
+          echo "========================================"
+
+          node --version
+
+          echo ""
+          echo "========================================"
+          echo "npm"
+          echo "========================================"
+
+          npm --version
 
           echo ""
           echo "========================================"
           echo "yt-dlp"
           echo "========================================"
+
           python3 -m yt_dlp --version
 
           echo ""
           echo "========================================"
           echo "FFmpeg"
           echo "========================================"
+
           ffmpeg -version | head -n 1
 
           echo ""
           echo "========================================"
-          echo "YouTube extractor"
+          echo "PO TOKEN PROVIDERS"
           echo "========================================"
-          python3 -m yt_dlp --list-extractors | grep -i "^youtube" | head -20 || true
+
+          python3 -m yt_dlp \
+            --verbose \
+            --simulate \
+            "https://www.youtube.com/watch?v=M9NQT9q7PEE" \
+            2>&1 | grep -E \
+            "PO Token Providers|bgutil|youtube]" \
+            | head -30 || true
 
 
       # ==========================================
-      # 5. SEND START MESSAGE
+      # 8. SEND START MESSAGE
       # ==========================================
       - name: Send started message
         run: |
@@ -110,12 +242,14 @@ jobs:
 
 
       # ==========================================
-      # 6. NORMALIZE YOUTUBE URL
+      # 9. NORMALIZE YOUTUBE URL
       # ==========================================
       - name: Normalize YouTube URL
         shell: bash
         run: |
           set -e
+
+          mkdir -p work
 
           RAW_URL="$(printf '%s' "$YOUTUBE_URL" | tr -d '\r\n')"
 
@@ -129,55 +263,55 @@ jobs:
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
-          # Short youtu.be URL
+          # Short YouTube URL
           if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtu\.be/([A-Za-z0-9_-]{11}) ]]; then
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
-          # Shorts URL
+          # YouTube Shorts
           if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtube\.com/shorts/([A-Za-z0-9_-]{11}) ]]; then
             VIDEO_ID="${BASH_REMATCH[1]}"
           fi
 
           if [[ -z "$VIDEO_ID" ]]; then
-            echo "ERROR: Could not extract a YouTube video ID."
-            echo "Received:"
+            echo "ERROR: Could not extract YouTube video ID."
+
             printf '<%s>\n' "$RAW_URL"
+
             exit 1
           fi
 
           CANONICAL_URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
 
           echo ""
-          echo "Extracted video ID:"
+          echo "Video ID:"
           echo "$VIDEO_ID"
 
           echo ""
-          echo "Canonical YouTube URL:"
+          echo "Canonical URL:"
           echo "$CANONICAL_URL"
 
-          printf '%s' "$CANONICAL_URL" > work_youtube_url.txt
+          printf '%s' "$CANONICAL_URL" > work/youtube_url.txt
 
 
       # ==========================================
-      # 7. TEST YOUTUBE EXTRACTOR
+      # 10. TEST YOUTUBE + PO TOKEN
       # ==========================================
       - name: Test YouTube extraction
         shell: bash
         run: |
           set -e
 
-          URL="$(cat work_youtube_url.txt)"
+          URL="$(cat work/youtube_url.txt)"
 
           echo "========================================"
-          echo "TESTING YOUTUBE EXTRACTOR"
+          echo "TESTING YOUTUBE + PO TOKEN"
           echo "========================================"
 
           echo "URL:"
           echo "$URL"
 
           echo ""
-          echo "Running yt-dlp..."
 
           python3 -m yt_dlp \
             --verbose \
@@ -185,24 +319,22 @@ jobs:
             --no-playlist \
             --force-ipv4 \
             --ies "youtube" \
-            --extractor-args "youtube:player_client=ios,mweb" \
+            --extractor-args "youtube:player_client=mweb" \
             "$URL"
 
 
       # ==========================================
-      # 8. DOWNLOAD VIDEO
+      # 11. DOWNLOAD YOUTUBE VIDEO
       # ==========================================
       - name: Download YouTube video
         shell: bash
         run: |
           set -e
 
-          mkdir -p work
-
-          URL="$(cat work_youtube_url.txt)"
+          URL="$(cat work/youtube_url.txt)"
 
           echo "========================================"
-          echo "DOWNLOADING VIDEO"
+          echo "DOWNLOADING YOUTUBE VIDEO"
           echo "========================================"
 
           echo "URL:"
@@ -213,7 +345,7 @@ jobs:
             --no-playlist \
             --force-ipv4 \
             --ies "youtube" \
-            --extractor-args "youtube:player_client=ios,mweb" \
+            --extractor-args "youtube:player_client=mweb" \
             -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b" \
             --merge-output-format mp4 \
             --restrict-filenames \
@@ -229,7 +361,7 @@ jobs:
 
 
       # ==========================================
-      # 9. VERIFY VIDEO
+      # 12. VERIFY VIDEO
       # ==========================================
       - name: Verify downloaded video
         shell: bash
@@ -241,6 +373,7 @@ jobs:
 
             echo ""
             echo "Files found:"
+
             find work -maxdepth 2 -type f -print
 
             exit 1
@@ -261,7 +394,7 @@ jobs:
 
 
       # ==========================================
-      # 10. TRANSCRIBE
+      # 13. TRANSCRIBE
       # ==========================================
       - name: Transcribe video
         run: |
@@ -270,12 +403,13 @@ jobs:
             work/transcript.json
 
           echo ""
-          echo "Transcript:"
+          echo "Transcript created:"
+
           ls -lh work/transcript.json
 
 
       # ==========================================
-      # 11. GEMINI CLIP SELECTION
+      # 14. GEMINI CLIP SELECTION
       # ==========================================
       - name: Select best clips with Gemini
         run: |
@@ -286,12 +420,13 @@ jobs:
             "$GEMINI_MODEL"
 
           echo ""
-          echo "Gemini selected:"
+          echo "Selected clips:"
+
           cat work/clips.json
 
 
       # ==========================================
-      # 12. RENDER VERTICAL CLIPS
+      # 15. RENDER VERTICAL CLIPS
       # ==========================================
       - name: Render vertical clips
         run: |
@@ -305,11 +440,12 @@ jobs:
 
           echo ""
           echo "Rendered clips:"
+
           find work/output -maxdepth 1 -type f -print
 
 
       # ==========================================
-      # 13. SEND CLIPS TO TELEGRAM
+      # 16. SEND CLIPS TO TELEGRAM
       # ==========================================
       - name: Send clips to Telegram
         run: |
@@ -321,7 +457,7 @@ jobs:
 
 
       # ==========================================
-      # 14. SUCCESS MESSAGE
+      # 17. SUCCESS MESSAGE
       # ==========================================
       - name: Send completion message
         if: success()
@@ -333,8 +469,9 @@ jobs:
             --data-urlencode "text=✅ Job ${REQUEST_ID} completed! Your AI-selected clips are ready." \
             >/dev/null
 
+
       # ==========================================
-      # 15. FAILURE MESSAGE
+      # 18. FAILURE MESSAGE
       # ==========================================
       - name: Send failure message
         if: failure()
@@ -346,11 +483,34 @@ jobs:
             --data-urlencode "text=❌ Job ${REQUEST_ID} failed. Open GitHub Actions to see the exact failed step." \
             >/dev/null
 
+
       # ==========================================
-      # 16. CLEANUP
+      # 19. SHOW PO TOKEN LOG ON FAILURE
+      # ==========================================
+      - name: Show PO Token provider log
+        if: always()
+        run: |
+          echo "========================================"
+          echo "BGUTIL PROVIDER LOG"
+          echo "========================================"
+
+          if [ -f "bgutil-provider.log" ]; then
+            cat bgutil-provider.log
+          else
+            echo "No provider log found."
+          fi
+
+
+      # ==========================================
+      # 20. CLEANUP
       # ==========================================
       - name: Cleanup
         if: always()
         run: |
+          if [ -f "bgutil-provider.pid" ]; then
+            kill "$(cat bgutil-provider.pid)" 2>/dev/null || true
+          fi
+
           rm -rf work
+          rm -rf bgutil-ytdlp-pot-provider
           rm -f work_youtube_url.txt
