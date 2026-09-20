@@ -46,7 +46,7 @@ jobs:
 
 
       # ==========================================
-      # 2. INSTALL SYSTEM DEPENDENCIES
+      # 2. INSTALL SYSTEM TOOLS
       # ==========================================
       - name: Install FFmpeg and Python
         run: |
@@ -64,14 +64,14 @@ jobs:
 
 
       # ==========================================
-      # 4. VERIFY INSTALLATION
+      # 4. VERIFY TOOLS
       # ==========================================
       - name: Verify tools
         run: |
           echo "========================================"
-          echo "FFmpeg"
+          echo "Python"
           echo "========================================"
-          ffmpeg -version | head -n 1
+          python3 --version
 
           echo ""
           echo "========================================"
@@ -81,15 +81,15 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "Python"
+          echo "FFmpeg"
           echo "========================================"
-          python3 --version
+          ffmpeg -version | head -n 1
 
           echo ""
           echo "========================================"
-          echo "YouTube extractors"
+          echo "YouTube extractor"
           echo "========================================"
-          python3 -m yt_dlp --list-extractors | grep -i youtube | head -20 || true
+          python3 -m yt_dlp --list-extractors | grep -i "^youtube" | head -20 || true
 
 
       # ==========================================
@@ -101,105 +101,154 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=🎬 Job ${REQUEST_ID} started.
-            Downloading video and finding the best moments..." \
+            --data-urlencode "text=🎬 Job ${REQUEST_ID} started. Downloading video and finding the best moments..." \
             >/dev/null
 
 
       # ==========================================
-      # 6. PREPARE YOUTUBE URL
+      # 6. NORMALIZE YOUTUBE URL
       # ==========================================
-      - name: Prepare YouTube URL
+      - name: Normalize YouTube URL
+        shell: bash
         run: |
-          mkdir -p work
+          set -e
 
-          CLEAN_URL="$(printf '%s' "$YOUTUBE_URL" | tr -d '\r\n')"
+          RAW_URL="$(printf '%s' "$YOUTUBE_URL" | tr -d '\r\n')"
 
-          echo "Original URL:"
-          printf '[%s]\n' "$YOUTUBE_URL"
+          echo "Raw URL:"
+          printf '<%s>\n' "$RAW_URL"
 
-          echo ""
-          echo "Clean URL:"
-          printf '[%s]\n' "$CLEAN_URL"
+          VIDEO_ID=""
 
-          if [ -z "$CLEAN_URL" ]; then
-            echo "ERROR: YouTube URL is empty."
+          # Standard YouTube watch URL
+          if [[ "$RAW_URL" =~ youtube\.com/watch\?[^[:space:]]*v=([A-Za-z0-9_-]{11}) ]]; then
+            VIDEO_ID="${BASH_REMATCH[1]}"
+          fi
+
+          # Short youtu.be URL
+          if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtu\.be/([A-Za-z0-9_-]{11}) ]]; then
+            VIDEO_ID="${BASH_REMATCH[1]}"
+          fi
+
+          # Shorts URL
+          if [[ -z "$VIDEO_ID" && "$RAW_URL" =~ youtube\.com/shorts/([A-Za-z0-9_-]{11}) ]]; then
+            VIDEO_ID="${BASH_REMATCH[1]}"
+          fi
+
+          if [[ -z "$VIDEO_ID" ]]; then
+            echo "ERROR: Could not extract a YouTube video ID."
+            echo "Received:"
+            printf '<%s>\n' "$RAW_URL"
             exit 1
           fi
 
-          echo "$CLEAN_URL" > work/youtube_url.txt
+          CANONICAL_URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+
+          echo ""
+          echo "Extracted video ID:"
+          echo "$VIDEO_ID"
+
+          echo ""
+          echo "Canonical YouTube URL:"
+          echo "$CANONICAL_URL"
+
+          printf '%s' "$CANONICAL_URL" > work_youtube_url.txt
 
 
       # ==========================================
-      # 7. TEST YOUTUBE URL / EXTRACTOR
+      # 7. TEST YOUTUBE EXTRACTOR
       # ==========================================
       - name: Test YouTube extraction
+        shell: bash
         run: |
-          CLEAN_URL="$(cat work/youtube_url.txt)"
+          set -e
 
-          echo "Testing YouTube extraction..."
-          echo "URL: $CLEAN_URL"
+          URL="$(cat work_youtube_url.txt)"
+
+          echo "========================================"
+          echo "TESTING YOUTUBE EXTRACTOR"
+          echo "========================================"
+
+          echo "URL:"
+          echo "$URL"
+
+          echo ""
+          echo "Running yt-dlp..."
 
           python3 -m yt_dlp \
             --verbose \
             --simulate \
             --no-playlist \
             --force-ipv4 \
+            --ies "youtube" \
             --extractor-args "youtube:player_client=web,web_safari,android,tv" \
-            "$CLEAN_URL"
+            "$URL"
 
 
       # ==========================================
-      # 8. DOWNLOAD YOUTUBE VIDEO
+      # 8. DOWNLOAD VIDEO
       # ==========================================
       - name: Download YouTube video
+        shell: bash
         run: |
-          CLEAN_URL="$(cat work/youtube_url.txt)"
+          set -e
+
+          mkdir -p work
+
+          URL="$(cat work_youtube_url.txt)"
 
           echo "========================================"
-          echo "DOWNLOADING YOUTUBE VIDEO"
+          echo "DOWNLOADING VIDEO"
           echo "========================================"
+
+          echo "URL:"
+          echo "$URL"
 
           python3 -m yt_dlp \
             --verbose \
             --no-playlist \
             --force-ipv4 \
+            --ies "youtube" \
             --extractor-args "youtube:player_client=web,web_safari,android,tv" \
             -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b" \
             --merge-output-format mp4 \
             --restrict-filenames \
-            --no-warnings \
             -o "work/source.%(ext)s" \
-            "$CLEAN_URL"
+            "$URL"
 
           echo ""
           echo "========================================"
-          echo "DOWNLOADED FILES"
+          echo "DOWNLOAD RESULT"
           echo "========================================"
 
-          ls -lah work/
+          find work -maxdepth 1 -type f -ls
 
 
       # ==========================================
-      # 9. CHECK DOWNLOADED VIDEO
+      # 9. VERIFY VIDEO
       # ==========================================
       - name: Verify downloaded video
+        shell: bash
         run: |
+          set -e
+
           if [ ! -f "work/source.mp4" ]; then
             echo "ERROR: work/source.mp4 was not created."
 
             echo ""
-            echo "Files currently in work:"
+            echo "Files found:"
             find work -maxdepth 2 -type f -print
 
             exit 1
           fi
 
-          echo "Video found:"
+          echo "Video successfully downloaded."
+
           ls -lh work/source.mp4
 
           echo ""
           echo "Video information:"
+
           ffprobe \
             -v error \
             -show_entries format=duration,size \
@@ -208,7 +257,7 @@ jobs:
 
 
       # ==========================================
-      # 10. TRANSCRIBE VIDEO
+      # 10. TRANSCRIBE
       # ==========================================
       - name: Transcribe video
         run: |
@@ -217,12 +266,12 @@ jobs:
             work/transcript.json
 
           echo ""
-          echo "Transcript created:"
+          echo "Transcript:"
           ls -lh work/transcript.json
 
 
       # ==========================================
-      # 11. SELECT BEST CLIPS WITH GEMINI
+      # 11. GEMINI CLIP SELECTION
       # ==========================================
       - name: Select best clips with Gemini
         run: |
@@ -233,7 +282,7 @@ jobs:
             "$GEMINI_MODEL"
 
           echo ""
-          echo "Selected clips:"
+          echo "Gemini selected:"
           cat work/clips.json
 
 
@@ -268,7 +317,7 @@ jobs:
 
 
       # ==========================================
-      # 14. COMPLETION MESSAGE
+      # 14. SUCCESS MESSAGE
       # ==========================================
       - name: Send completion message
         if: success()
@@ -277,10 +326,8 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ Job ${REQUEST_ID} completed!
-             Your AI-selected clips have been sent above." \
+            --data-urlencode "text=✅ Job ${REQUEST_ID} completed! Your AI-selected clips are ready." \
             >/dev/null
-
 
       # ==========================================
       # 15. FAILURE MESSAGE
@@ -292,10 +339,8 @@ jobs:
             -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=❌ Job ${REQUEST_ID} failed.
-            Check the GitHub Actions log for the exact error." \
+            --data-urlencode "text=❌ Job ${REQUEST_ID} failed. Open GitHub Actions to see the exact failed step." \
             >/dev/null
-
 
       # ==========================================
       # 16. CLEANUP
@@ -304,3 +349,4 @@ jobs:
         if: always()
         run: |
           rm -rf work
+          rm -f work_youtube_url.txt
