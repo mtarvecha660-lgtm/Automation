@@ -60,7 +60,11 @@ jobs:
       - name: Install Python packages
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -U "yt-dlp[default]" faster-whisper requests
+
+          python3 -m pip install -U \
+            "yt-dlp[default]" \
+            faster-whisper \
+            requests
 
 
       # ==========================================
