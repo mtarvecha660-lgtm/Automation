@@ -181,7 +181,7 @@ jobs:
             --no-playlist \
             --force-ipv4 \
             --ies "youtube" \
-            --extractor-args "youtube:player_client=web,web_safari,android,tv" \
+            --extractor-args "youtube:player_client=ios,mweb" \
             "$URL"
 
 
@@ -209,7 +209,7 @@ jobs:
             --no-playlist \
             --force-ipv4 \
             --ies "youtube" \
-            --extractor-args "youtube:player_client=web,web_safari,android,tv" \
+            --extractor-args "youtube:player_client=ios,mweb" \
             -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b" \
             --merge-output-format mp4 \
             --restrict-filenames \
